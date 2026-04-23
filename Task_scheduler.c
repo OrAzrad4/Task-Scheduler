@@ -128,7 +128,7 @@ bool remove_task(void (*task_function)(void)) {
 	return false;                       // we didnt found the the input task
 }
 
-
+// This function probably call from ISR 
 void scheduler_tick() {
 
 	lock_scheduler();
