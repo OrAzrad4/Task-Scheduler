@@ -3,6 +3,8 @@
 #include <stdbool.h>
 #include <string.h>
 #include <stdio.h>
+#include <limits.h>
+
 
 #define MAX_TASKS 16
 #define TICK_MS 1
@@ -38,12 +40,12 @@ typedef struct {
 	uint8_t priority;
 	bool is_sporadic;
 	task_state state;
+	volatile uint32_t watchdog_timer;
 } Task;
 
 static Task tasks[MAX_TASKS];   // Static array for 16 missions
 static uint8_t task_count = 0;  // How much tasks
-static uint32_t current_time = 0; // Main timer
-static volatile uint32_t watchdog_timer = 0;  
+static volatile uint32_t current_time = 0; // Main timer
 
 void scheduler_init() {
 
@@ -55,7 +57,6 @@ void scheduler_init() {
 	
 	task_count = 0;
 	current_time = 0;
-	watchdog_timer = 0;
 }
 
 
@@ -71,15 +72,15 @@ bool add_task(void (*task_function)(void), uint32_t period, uint32_t execution_t
 
 	int empty_index=-1;
 	for (int i = 0; i < MAX_TASKS; i++) {
-		if (tasks[i].state != TASK_EMPTY && tasks[i].priority == priority) {
+		if (tasks[i].state != TASK_EMPTY && tasks[i].priority == priority) {   // Invalid - two tasks with the same priority
 			unlock_scheduler();
 			return false;
 		}
-		if (tasks[i].state == TASK_EMPTY && empty_index == -1) {
+		if (tasks[i].state == TASK_EMPTY && empty_index == -1) {   // First empty place
 			empty_index = i;
 		}
 	}
-	if (empty_index == -1) {
+	if (empty_index == -1) {                     // The array is full of tasks
 		unlock_scheduler();
 		return false;
 	}
@@ -89,7 +90,7 @@ bool add_task(void (*task_function)(void), uint32_t period, uint32_t execution_t
 	tasks[empty_index].priority = priority;
 	tasks[empty_index].last_run = 0;
 
-	if (period == 0) {
+	if (period == 0) {                         // Sign for sporadic task
 		tasks[empty_index].is_sporadic = true;
 		tasks[empty_index].state = TASK_WAITING;
 		tasks[empty_index].next_run = 0;
@@ -97,7 +98,7 @@ bool add_task(void (*task_function)(void), uint32_t period, uint32_t execution_t
 	else {
 		tasks[empty_index].is_sporadic = false;
 		tasks[empty_index].state = TASK_READY;
-		tasks[empty_index].next_run = current_time;  //ready now
+		tasks[empty_index].next_run = current_time;  //ready now for running (we can decide to wait few ms)
 	}
 
 	task_count++;
@@ -112,6 +113,10 @@ bool remove_task(void (*task_function)(void)) {
 	lock_scheduler();
 	for (int i = 0; i < MAX_TASKS; i++) {
 		if (tasks[i].state != TASK_EMPTY && tasks[i].function == task_function) {
+			if (tasks[i].state == TASK_RUNNING) { // Cant remove running task
+				unlock_scheduler(); 
+				return false;       
+			}
 			tasks[i].state = TASK_EMPTY;
 			tasks[i].function = NULL;
 			task_count--;
@@ -120,34 +125,38 @@ bool remove_task(void (*task_function)(void)) {
 		}
 	}
 	unlock_scheduler();
-	return false;
+	return false;                       // we didnt found the the input task
 }
 
 
 void scheduler_tick() {
 
 	lock_scheduler();
-	current_time++;
-	watchdog_timer++;
+	current_time++;                             // Each 1 ms we need to add 1 to the main timer and the watchdog timer
 	for (int i = 0; i < MAX_TASKS; i++) {
 		if (tasks[i].state == TASK_EMPTY) continue;
 
-		if (tasks[i].state == TASK_RUNNING) {
-			if (watchdog_timer > tasks[i].execution_time) {
-				printf("Watchdog Error: Task %d exceeded max execution time\n", i); // Print outside is better because performance
+
+
+		if (tasks[i].state == TASK_RUNNING) { 
+			tasks[i].watchdog_timer++;
+
+			if (tasks[i].watchdog_timer > tasks[i].execution_time) {     // The task run more time then she need
+				printf("Watchdog Error: Task %d exceeded max execution time\n", i); // Print outside is better because performance (can change it to flag)
+				// To do: stop this function 
 			}
 		}
 
-		if (tasks[i].is_sporadic == false) {
-			if (current_time >= tasks[i].next_run) {
-				if (tasks[i].state == TASK_RUNNING || tasks[i].state == TASK_READY) {
+		if (tasks[i].is_sporadic == false) {            // Sporadic tasks dont have deadline 
+			if (current_time >= tasks[i].next_run) {   // the task need to be waiting now
+				if (tasks[i].state == TASK_RUNNING || tasks[i].state == TASK_READY) {    // The task is still in the last period 
 					printf("Deadline miss : the task didnt run yet in the last period\n");
 				}
 				else {
-					tasks[i].state = TASK_READY;  // Everything ok now put this task ready
+					tasks[i].state = TASK_READY;  // Everything ok (waiting state) now put this task ready
 				}
 
-				tasks[i].next_run += tasks[i].period;
+				tasks[i].next_run += tasks[i].period; // If the task is running so current_time < next_run or deadline
 			}
 			
 		}	
@@ -163,32 +172,35 @@ void run_scheduler() {
 	while (1) {
 
 
-		int max = -1, max_index = -1;
+		int max_priority = INT_MAX, max_index = -1;    // Define max priority such that the lowest number -> best priority
 		lock_scheduler();
 		for (int i = 0; i < MAX_TASKS; i++) {
 			if (tasks[i].state == TASK_READY) {
-				if (tasks[i].priority > max) {
-					max = tasks[i].priority;
+				if (tasks[i].priority < max_priority) {
+					max_priority = tasks[i].priority;
 					max_index = i;
 				}
 			}
 		}
-		if (max != -1) {   // Task found
+		if (max_index != -1) {   // Task found
 			tasks[max_index].state = TASK_RUNNING;
-			watchdog_timer = 0;
-			unlock_scheduler();
-			tasks[max_index].last_run = current_time;
+			tasks[max_index].watchdog_timer = 0;                    // ready for new task
+			tasks[max_index].last_run = current_time; // in this position time this task start to run
+			unlock_scheduler();                     // open the lock for different cores to run in parallel
 			tasks[max_index].function();
-			lock_scheduler();
+			lock_scheduler();                         // Prevent race condition in cases of different core run or tick reads status
 			tasks[max_index].state = TASK_WAITING;
 			unlock_scheduler();
 		}
-		else {
+		else {               // No ready task found
 			unlock_scheduler();
+			__asm__("wfi");   // Low power mode - wait for interrupt
 		}
+		
 	}
 }
 
+// This function probably call from ISR 
 bool trigger_sporadic_task(void (*task_function)(void)) {
 	if (task_function == NULL) return false;
 
