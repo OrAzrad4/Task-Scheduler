@@ -172,12 +172,12 @@ void run_scheduler() {
 	while (1) {
 
 
-		int max_priority = INT_MAX, max_index = -1;    // Define max priority such that the lowest number -> best priority
+		int best_priority = INT_MAX, max_index = -1;    // Define max priority such that the lowest number -> best priority
 		lock_scheduler();
 		for (int i = 0; i < MAX_TASKS; i++) {
 			if (tasks[i].state == TASK_READY) {
-				if (tasks[i].priority < max_priority) {
-					max_priority = tasks[i].priority;
+				if (tasks[i].priority < best_priority) {
+					best_priority = tasks[i].priority;
 					max_index = i;
 				}
 			}
